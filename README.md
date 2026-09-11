@@ -36,17 +36,6 @@ python report_agent.py
 
 Files are written under `output/` (basename only; paths are stripped).
 
-## Docker
-
-```bash
-cp .env.example .env
-# put keys in .env
-docker compose build
-docker compose run --rm agent "How vector databases compare for RAG"
-```
-
-Reports persist in `./output` via the compose volume.
-
 ## Pipeline
 
 1. Plan 3–5 sub-questions
