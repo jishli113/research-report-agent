@@ -1,6 +1,7 @@
 import argparse
 import os
 from pathlib import Path
+from collections import defaultdict
 
 import anthropic
 import httpx
@@ -15,22 +16,35 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 MAX_CYCLES = 40
 MAX_TOOL_RETRIES = 3
 MAX_PAGE_CHARS = 4_000
+SEARCH_WEB_LIMITS = 3
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
 SYSTEM = (
     "Act as a researcher investigating a question and generate "
-    "3-5 research sub-questions. For every sub-question search, then read, "
-    "then save notes on the research (max 150 words). Create a filename for each "
+    "3-5 research sub-questions by yourself given a topic. For every sub-question search, then read, "
+    "then save notes on the research (max 300 words). Never call search_web for "
+    "a subtopic after calling save_notes on it. Create a filename for each "
     "subresearch question when calling search_web and use the same filename when "
-    "calling save_notes. When all sub-questions have notes saved, read those files. "
-    "Then synthesize a final markdown report. Name the report file after the topic. "
-    "Include sections, source URLs, and confidence notes. If evidence is thin, say so."
+    "calling save_notes. When all sub-questions have notes saved, call read_from_file "
+    "once per notes file, then immediately call create_synthesis. Do not call "
+    "read_from_file again after you already received those file contents. Do not "
+    "repeat the same tool calls. Name the report file after the topic. Include "
+    "sections, source URLs, and confidence notes. If evidence is thin, say so. "
+    "Do not write a full report from pretraining memory if tools fail."
+    "or state that sources could not be retrieved."
 )
 
 TOOL_ERROR_MESSAGE = (
     "The tool failed. If it was for a sub-topic, skip that topic and continue. "
     "If it was the final report, stop after this or the next iteration."
 )
+
+SEARCH_WEB_ERROR_MESSAGE = "This subtopic has been researched enough. Please stop researching this, save the notes and continue on."
+
+READ_FILE_ERROR_MESSAGE = "This file has already been read from. Please stop reading from this and instead reference the information" \
+"read from this file from before."
+
+SAVE_NOTES_ERROR_MESSAGE = "This file has already been saved to. Please stop saving to this and carry on."
 
 client = anthropic.Anthropic()
 tools = [
@@ -117,7 +131,10 @@ def output_path(filename: str) -> Path:
 
 
 def html_to_text(html: str) -> str:
-    soup = BeautifulSoup(html, "lxml")
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
     text = "\n".join(
@@ -238,9 +255,12 @@ def compact_research_notes(messages, filename):
 
 def run_agent(topic: str) -> None:
     messages = [{"role": "user", "content": topic}]
+    search_web_counts = defaultdict(int)
+    files_read_from = set()
+    files_saved_to = set()
     for i in range(MAX_CYCLES):
         response = client.messages.create(
-            max_tokens=1024,
+            max_tokens=4096,
             model=ANTHROPIC_MODEL,
             tools=tools,
             messages=messages,
@@ -253,6 +273,27 @@ def run_agent(topic: str) -> None:
                     continue
                 retries = 0
                 output = None
+                if block.name == "search_web" and search_web_counts[block.input["filename"]] == SEARCH_WEB_LIMITS:
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": SEARCH_WEB_ERROR_MESSAGE
+                    })
+                    continue
+                if block.name == "read_from_file" and block.input["filename"] in files_read_from:
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": READ_FILE_ERROR_MESSAGE
+                    })
+                    continue
+                if block.name == "save_notes" and block.input["filename"] in files_saved_to:
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": SAVE_NOTES_ERROR_MESSAGE
+                    })
+                    continue
                 while retries < MAX_TOOL_RETRIES:
                     output = run_tool(block.name, block.input)
                     if output and output.get("status"):
@@ -268,6 +309,12 @@ def run_agent(topic: str) -> None:
                         }
                     )
                 else:
+                    if block.name == "search_web":
+                        search_web_counts[block.input["filename"]] += 1
+                    elif block.name == "read_from_file":
+                        files_read_from.add(block.input["filename"])
+                    elif block.name == "save_notes":
+                        files_saved_to.add(block.input["filename"])
                     tool_results.append(
                         {
                             "type": "tool_result",
@@ -283,6 +330,7 @@ def run_agent(topic: str) -> None:
         if response.stop_reason == "end_turn" or i == MAX_CYCLES - 1:
             for block in response.content:
                 if block.type == "text":
+                    print("finished at: ", i)
                     print(block.text)
             break
 
