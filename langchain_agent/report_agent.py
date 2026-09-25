@@ -1,13 +1,12 @@
+from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
+
 import os
 from dotenv import load_dotenv
 
-import argparse
-import os
 from pathlib import Path
-from collections import defaultdict
 
-import anthropic
+
 import httpx
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -16,9 +15,28 @@ from tavily import TavilyClient
 load_dotenv()
 
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+MAX_CYCLES = 40
+MAX_TOOL_RETRIES = 3
+MAX_PAGE_CHARS = 4_000
 
-client = ChatAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+SYSTEM = (
+    "Act as a researcher investigating a question and generate "
+    "3-5 research sub-questions by yourself given a topic. For every sub-question search, then read, "
+    "then save notes on the research (max 300 words). Never call search_web for "
+    "a subtopic after calling save_notes on it. Create a filename for each "
+    "subresearch question when calling search_web and use the same filename when "
+    "calling save_notes. When all sub-questions have notes saved, call read_from_file "
+    "once per notes file, then immediately call create_synthesis. Do not call "
+    "read_from_file again after you already received those file contents. Do not "
+    "repeat the same tool calls. Name the report file after the topic. Include "
+    "sections, source URLs, and confidence notes. If evidence is thin, say so. "
+    "Do not write a full report from pretraining memory if tools fail."
+    "or state that sources could not be retrieved."
+)
 
+client = ChatAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), model_name=ANTHROPIC_MODEL)
+OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
 def output_path(filename: str) -> Path:
     name = Path(filename).name or "untitled.txt"
@@ -62,6 +80,14 @@ def fetch_page(url: str) -> str:
 
 
 def write_to_file(filename: str, content: str):
+    """Write the research summary contents to a file.
+
+    Args:
+        query: The filename of the file to write the research summary to.
+
+    Returns:
+        An object with status determining if it succeeded or not and content which is either the information to write or the error body.
+    """
     try:
         path = output_path(filename)
         path.write_text(content, encoding="utf-8")
@@ -71,6 +97,14 @@ def write_to_file(filename: str, content: str):
 
 
 def read_from_file(filename: str):
+    """Read the research summary contents from a file.
+
+    Args:
+        query: The filename of the file containing the research summary.
+
+    Returns:
+        An object with status determining if it succeeded or not and content which is either the information or the error body.
+    """
     try:
         path = output_path(filename)
         content = path.read_text(encoding="utf-8")
@@ -80,6 +114,14 @@ def read_from_file(filename: str):
 
 
 def search_web(query: str):
+    """Search the web for a given query and return the top results.
+
+    Args:
+        query: The search term to look up.
+
+    Returns:
+        An object with status determining if it succeeded or not and content which is either the search return information or the error body.
+    """
     if not query:
         return {"status": False, "content": "Error: missing required argument 'query'"}
 
@@ -138,4 +180,18 @@ def compact_research_notes(messages, filename):
             if isinstance(item, dict) and item.get("tool_use_id") in block_ids:
                 item["content"] = stub
 
-tools = [compact_research_notes, search_web, read_from_file, write_to_file]
+def run_agent(topic):
+    tools = [search_web, read_from_file, write_to_file]
+    prompt = {
+        "messages":[{"role": "user", "content": topic}],
+    }
+    agent = create_agent(model=client, tools=tools)
+    return agent.invoke(prompt, config={"recursion_limit":MAX_CYCLES})
+
+def main():
+    research_topic = input("What research topic would you like the agent to research about: ")
+    if not research_topic.strip():
+        raise SystemExit("A research topic is required.")
+    print(run_agent(research_topic))
+if __name__ == "__main__":
+    main()
