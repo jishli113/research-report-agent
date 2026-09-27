@@ -232,6 +232,7 @@ def compact_research_notes(messages, to_compact):
         if filename is None:
             continue
         message.content = f"Saved research note information to: {filename}"
+        print(message.name, message.tool_call_id, message.content)
                 
 tools = [search_web, read_from_file, write_to_file, create_synthesis]
 
@@ -251,7 +252,6 @@ def check_if_notes_saved(agent_state):
             break
         if isinstance(message, ToolMessage):
             tool_messages.append(message)
-
     to_compact = {}
     if ai_message is not None:
         calls_by_id = {call["id"]: call for call in ai_message.tool_calls}
@@ -262,6 +262,7 @@ def check_if_notes_saved(agent_state):
             if call is None:
                 continue
             to_compact[result.tool_call_id] = call["args"]["filename"]
+    print("to compact: ", to_compact)
     if to_compact:
         compact_research_notes(messages, to_compact)
     return "iteration_check"

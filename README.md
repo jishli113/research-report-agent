@@ -26,9 +26,12 @@ Create a `.env` in the repo root:
 ```bash
 ANTHROPIC_API_KEY=...
 TAVILY_API_KEY=...
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=...
+LANGSMITH_PROJECT=research-report-agent
 ```
 
-`TAVILY_API_KEY` is optional. `ANTHROPIC_MODEL` is optional and defaults to `claude-3-5-haiku-20241022`.
+`TAVILY_API_KEY` is optional. `ANTHROPIC_MODEL` is optional and defaults to `claude-3-5-haiku-20241022`. The `LANGSMITH_*` variables are optional and apply only to the LangGraph agent.
 
 ## Manual agent
 
@@ -53,6 +56,16 @@ python langchain_agent/report_agent.py
 It prompts for a topic. Files land in `langchain_agent/output/`.
 
 Each model turn goes `llm` → `tools` → notes check → iteration check, then back to `llm`. `search_web` and `write_to_file` share a `filename`. After a successful `write_to_file`, the matching `search_web` page text in the message list is replaced with a short stub. The run stops when `create_synthesis` succeeds, when the model replies with no tool call, or after 40 model turns.
+
+### LangSmith
+
+The LangGraph agent sends a trace to [LangSmith](https://smith.langchain.com/) when `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, and `LANGSMITH_PROJECT` are set. No tracing code is added in `report_agent.py`. LangGraph records each node and tool call on its own. The manual agent does not.
+
+A trace is one research topic. The waterfall is `llm` → `tools` → notes check → iteration check, repeated until `create_synthesis` or the 40-turn cap. Latency and token counts on those spans are the metrics used to find bottlenecks:
+
+- `search_web` dominates the `tools` span. Each call fetches up to three pages and keeps about 4,000 characters of text per page, so a slow run is usually network fetch time, not the model.
+- The `llm` span grows when a later turn still carries those page dumps. After `write_to_file`, the notes check is supposed to replace that text with a short stub. If the next `llm` span is still large, compaction did not stick.
+- Extra cycles after the notes exist show up as more `search_web` or `read_from_file` calls than sub-questions. The iteration-check span is where a run ends on `create_synthesis`, on a reply with no tool call, or at 40 turns.
 
 ## Pipeline
 
