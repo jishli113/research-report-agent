@@ -1,4 +1,4 @@
-from langchain.agents import create_agent, AgentState
+from langchain.agents import AgentState
 from langchain_anthropic import ChatAnthropic
 from langgraph.graph import START, StateGraph, END
 from langchain_core.tools import tool
@@ -296,13 +296,27 @@ def iterations_check(agent_state):
 
 def pass_through(agent_state):
     return {}
+
+def retry_tool(request, execute):
+    last_error = None
+    for _ in range(MAX_TOOL_RETRIES):
+        try:
+            return execute(request)
+        except Exception as exc:
+            last_error = exc
+    return ToolMessage(
+        content=f"{last_error}\n\n{TOOL_ERROR_MESSAGE}",
+        name=request.tool_call["name"],
+        tool_call_id=request.tool_call["id"],
+        status="error",
+    )
                 
 
 
 def run_agent(topic):
     graph = StateGraph(AgentState)
     graph.add_node("llm", llm_call)
-    graph.add_node("tools", ToolNode(tools, handle_tool_errors=True))
+    graph.add_node("tools", ToolNode(tools, handle_tool_errors=False, wrap_tool_call=retry_tool))
     graph.add_node("iteration_check", pass_through)
     graph.add_edge(START, "llm")
     graph.add_conditional_edges(
